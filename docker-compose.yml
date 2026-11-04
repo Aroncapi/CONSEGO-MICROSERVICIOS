@@ -1,0 +1,279 @@
+networks:
+  consego-v3-network:
+    driver: bridge
+    name: consego-v3-network
+
+volumes:
+  mysql_v3_data:
+    driver: local
+  rabbitmq_v3_data:
+    driver: local
+  mongodb_v3_data:
+    driver: local
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: consego-v3-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: authdb
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_v3_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - consego-v3-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: consego-v3-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_ERLANG_COOKIE: "consego_erlang_cookie_secret_123"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_v3_data:/var/lib/rabbitmq/mnesia
+    networks:
+      - consego-v3-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mongodb:
+    image: mongo:7.0
+    container_name: consego-v3-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_v3_data:/data/db
+    networks:
+      - consego-v3-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  eureka-server:
+    image: consego-v3-eureka:3.0
+    build:
+      context: ./eureka-server
+      dockerfile_inline: |
+        FROM maven:3.9.6-eclipse-temurin-17 AS build
+        WORKDIR /app
+        COPY pom.xml .
+        RUN mvn dependency:go-offline -B
+        COPY src ./src
+        RUN mvn clean package -DskipTests
+        FROM eclipse-temurin:17-jre-alpine
+        WORKDIR /app
+        COPY --from=build /app/target/*.jar app.jar
+        EXPOSE 8761
+        ENTRYPOINT ["java", "-jar", "app.jar"]
+    container_name: consego-v3-eureka
+    restart: on-failure
+    ports:
+      - "8761:8761"
+    environment:
+      EUREKA_INSTANCE_HOSTNAME: eureka-server
+    networks:
+      - consego-v3-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8761/eureka/apps || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  auth-service:
+    image: consego-v3-auth:3.0
+    build:
+      context: ./auth-service
+      dockerfile_inline: |
+        FROM maven:3.9.6-eclipse-temurin-17 AS build
+        WORKDIR /app
+        COPY pom.xml .
+        RUN mvn dependency:go-offline -B
+        COPY src ./src
+        RUN mvn clean package -DskipTests
+        FROM eclipse-temurin:17-jre-alpine
+        WORKDIR /app
+        COPY --from=build /app/target/*.jar app.jar
+        EXPOSE 8081
+        ENTRYPOINT ["java", "-jar", "app.jar"]
+    container_name: consego-v3-auth
+    restart: on-failure
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/authdb?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.MySQLDialect
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+    networks:
+      - consego-v3-network
+
+  solicitudes-service:
+    image: consego-v3-solicitudes:3.0
+    build:
+      context: ./solicitudes-service
+      dockerfile_inline: |
+        FROM maven:3.9.6-eclipse-temurin-17 AS build
+        WORKDIR /app
+        COPY pom.xml .
+        RUN mvn dependency:go-offline -B
+        COPY src ./src
+        RUN mvn clean package -DskipTests
+        FROM eclipse-temurin:17-jre-alpine
+        WORKDIR /app
+        COPY --from=build /app/target/*.jar app.jar
+        EXPOSE 8082
+        ENTRYPOINT ["java", "-jar", "app.jar"]
+    container_name: consego-v3-solicitudes
+    restart: on-failure
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/appdb?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.MySQLDialect
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      AUTH_SERVICE_URL: http://auth-service:8081
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+      auth-service:
+        condition: service_started
+    networks:
+      - consego-v3-network
+
+  audit-service:
+    image: consego-v3-audit:3.0
+    build:
+      context: ./audit-service
+      dockerfile_inline: |
+        FROM maven:3.9.6-eclipse-temurin-17 AS build
+        WORKDIR /app
+        COPY pom.xml .
+        RUN mvn dependency:go-offline -B
+        COPY src ./src
+        RUN mvn clean package -DskipTests
+        FROM eclipse-temurin:17-jre-alpine
+        WORKDIR /app
+        COPY --from=build /app/target/*.jar app.jar
+        EXPOSE 8083
+        ENTRYPOINT ["java", "-jar", "app.jar"]
+    container_name: consego-v3-audit
+    restart: on-failure
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/auditdb
+      SPRING_DATA_MONGODB_AUTO_INDEX_CREATION: "true"
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+    networks:
+      - consego-v3-network
+
+  api-gateway:
+    image: consego-v3-gateway:3.0
+    build:
+      context: ./api-gateway
+      dockerfile_inline: |
+        FROM maven:3.9.6-eclipse-temurin-17 AS build
+        WORKDIR /app
+        COPY pom.xml .
+        RUN mvn dependency:go-offline -B
+        COPY src ./src
+        RUN mvn clean package -DskipTests
+        FROM eclipse-temurin:17-jre-alpine
+        WORKDIR /app
+        COPY --from=build /app/target/*.jar app.jar
+        EXPOSE 8080
+        ENTRYPOINT ["java", "-jar", "app.jar"]
+    container_name: consego-v3-gateway
+    restart: on-failure
+    ports:
+      - "8080:8080"
+    environment:
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_CLIENT_REGISTRYFETCHINTERVALSECONDS: "5"
+      AUTH_SERVICE_URI: lb://auth-service
+      SOLICITUDES_SERVICE_URI: lb://solicitudes-service
+      AUDIT_SERVICE_URI: lb://audit-service
+    depends_on:
+      eureka-server:
+        condition: service_started
+      auth-service:
+        condition: service_started
+      solicitudes-service:
+        condition: service_started
+      audit-service:
+        condition: service_started
+    networks:
+      - consego-v3-network
+
+  frontend:
+    image: consego-v3-frontend:3.0
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: consego-v3-frontend
+    restart: on-failure
+    ports:
+      - "4200:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - consego-v3-network

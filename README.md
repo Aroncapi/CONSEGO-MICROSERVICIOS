@@ -69,6 +69,22 @@ flowchart TD
 
 ---
 
+## ✅ Funcionalidades implementadas
+
+- **Autenticación y autorización** con JWT y BCrypt, con roles `Admin`, `Solicitante` y `Auditor`.
+- **CRUD completo de solicitudes de acceso** a plataformas críticas (AWS, Azure, GitHub, bases de datos, VMs).
+- **Validación sincrónica de usuarios** mediante OpenFeign + Resilience4J (Circuit Breaker).
+- **Aprobación y rechazo** de solicitudes según el rol.
+- **Auditoría asíncrona event-driven**: `solicitudes-service` publica eventos en RabbitMQ y `audit-service` los persiste en MongoDB.
+- **API Gateway** con validación centralizada de JWT, CORS y enrutamiento balanceado (`lb://`).
+- **Descubrimiento de servicios** con Eureka.
+- **SPA Angular** con login, registro/seguimiento de solicitudes y panel de administración.
+- **Persistencia políglota**: MySQL (auth y solicitudes) + MongoDB (auditoría).
+- **Despliegue** con Docker Compose y manifiestos de Kubernetes (`k8s/`).
+- **Pruebas** de repositorio con `@DataJpaTest` y H2.
+
+---
+
 ## 📦 Componentes y Microservicios
 
 | Componente | Puerto | Tecnología Principal | Responsabilidad |
